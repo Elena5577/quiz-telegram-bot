@@ -312,20 +312,30 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(answer_cb, pattern=r"^ans\|"))
     app.add_handler(CallbackQueryHandler(hint_cb, pattern="^hint$"))
 
-
 # ================== MAIN ==================
-def build_app() -> Application:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN не найден")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+def build_app(bot_token: str) -> Application:
+    app = ApplicationBuilder().token(bot_token).build()
     register_handlers(app)
     return app
 
 
 async def main():
+    # Берём токен и БД из переменных окружения Render
+    bot_token = os.getenv("BOT_TOKEN")
+    db_url = os.getenv("DATABASE_URL")
+
+    # Debug вывод в Render Logs
+    print("=== DEBUG STARTUP ===")
+    print("BOT_TOKEN:", bot_token[:10] if bot_token else "❌ not found")
+    print("DATABASE_URL:", db_url[:30] if db_url else "❌ not found")
+    print("=====================")
+
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN не найден")
+
     load_questions()
     await init_db()
-    app = build_app()
+    app = build_app(bot_token)
     log.info("Бот запущен.")
     await app.run_polling(allowed_updates=["message", "callback_query"])
 
