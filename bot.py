@@ -313,18 +313,24 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(hint_cb, pattern="^hint$"))
 
 # ================== MAIN ==================
+# ================== MAIN ==================
 def build_app(bot_token: str) -> Application:
     app = ApplicationBuilder().token(bot_token).build()
     register_handlers(app)
     return app
 
 
+async def on_startup(app: Application):
+    """Запускается один раз при старте бота"""
+    load_questions()
+    await init_db()
+    log.info("База данных и вопросы загружены.")
+
+
 def main():
-    # Берём токен и БД из переменных окружения Render
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
 
-    # Debug вывод в Render Logs
     print("=== DEBUG STARTUP ===")
     print("BOT_TOKEN:", bot_token[:10] if bot_token else "❌ not found")
     print("DATABASE_URL:", db_url[:30] if db_url else "❌ not found")
@@ -333,13 +339,11 @@ def main():
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не найден")
 
-    load_questions()
-    # init_db асинхронная — запускаем разово и выходим из event loop
-    asyncio.run(init_db())
-
     app = build_app(bot_token)
+    # навешиваем хук на старт
+    app.post_init = on_startup
+
     log.info("Бот запущен.")
-    # В PTB 20+ это блокирующий синхронный метод — именно его и вызываем
     app.run_polling(allowed_updates=["message", "callback_query"])
 
 
