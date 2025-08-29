@@ -1,2 +1,2 @@
 python-telegram-bot==20.7
-asyncpg==0.29.0
+asyncpg[binary]==0.29.0
