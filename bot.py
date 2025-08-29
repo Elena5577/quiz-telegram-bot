@@ -319,7 +319,7 @@ def build_app(bot_token: str) -> Application:
     return app
 
 
-async def main():
+def main():
     # Берём токен и БД из переменных окружения Render
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
@@ -334,11 +334,15 @@ async def main():
         raise RuntimeError("BOT_TOKEN не найден")
 
     load_questions()
-    await init_db()
+    # init_db асинхронная — запускаем разово и выходим из event loop
+    asyncio.run(init_db())
+
     app = build_app(bot_token)
     log.info("Бот запущен.")
-    await app.run_polling(allowed_updates=["message", "callback_query"])
+    # В PTB 20+ это блокирующий синхронный метод — именно его и вызываем
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
