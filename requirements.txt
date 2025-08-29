@@ -1,2 +1,5 @@
+pip==24.0
+setuptools>=67.0
+wheel
 python-telegram-bot==20.7
-asyncpg==0.29.0
+asyncpg[binary]==0.29.0
