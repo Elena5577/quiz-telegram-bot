@@ -312,6 +312,11 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(answer_cb, pattern=r"^ans\|"))
     app.add_handler(CallbackQueryHandler(hint_cb, pattern="^hint$"))
 
+def build_app(bot_token: str) -> Application:
+    app = ApplicationBuilder().token(bot_token).build()
+    register_handlers(app)
+    return app
+
 # ================== MAIN ==================
 # ================== MAIN ==================
 def main():
