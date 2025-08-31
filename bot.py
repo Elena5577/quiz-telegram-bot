@@ -261,11 +261,19 @@ async def async_main():
     # Создаём приложение
     app = build_app(bot_token)
 
-    # Стартуем polling (бот работает как background worker, порт не нужен)
-    await app.run_polling(allowed_updates=["message", "callback_query"])
+    # === Исправленный старт polling ===
+    await app.initialize()   # инициализация приложения
+    await app.start()        # старт приложения
+    print("Bot started… polling now")
 
-def main():
-    asyncio.run(async_main())
+    try:
+        # держим процесс живым, polling работает в фоне
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()           # используем уже существующий loop
+    loop.run_until_complete(async_main())     # запускаем async_main
