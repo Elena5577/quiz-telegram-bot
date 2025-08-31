@@ -216,14 +216,26 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(start, pattern="^menu$"))
 
 # ===== MAIN =====
-async def async_main():
-    await init_db()
-    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
-    register_handlers(app)
-    await app.run_polling()
-
 def main():
-    asyncio.run(async_main())
+    bot_token = os.getenv("BOT_TOKEN")
+    db_url = os.getenv("DATABASE_URL")
+
+    print("=== DEBUG STARTUP ===")
+    print("BOT_TOKEN:", (bot_token[:10] + "…") if bot_token else "❌ not found")
+    print("DATABASE_URL:", (db_url[:30] + "…") if db_url else "❌ not found")
+    print("=====================")
+
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN не найден")
+
+    load_questions()
+
+    # Создаём и назначаем event loop до run_polling (важно для Python 3.12)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    app = build_app(bot_token)
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 if __name__ == "__main__":
     main()
