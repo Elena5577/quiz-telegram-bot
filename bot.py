@@ -228,8 +228,6 @@ def main():
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не найден")
 
-    load_questions()
-
     # Создаём и назначаем event loop до run_polling (важно для Python 3.12)
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
