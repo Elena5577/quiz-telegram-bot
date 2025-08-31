@@ -319,7 +319,7 @@ def build_app(bot_token: str) -> Application:
 
 # ================== MAIN ==================
 # ================== MAIN ==================
-def main():
+async def main():
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
 
@@ -332,11 +332,14 @@ def main():
         raise RuntimeError("BOT_TOKEN не найден")
 
     load_questions()
-    asyncio.run(init_db())
+    await init_db()
+
     app = build_app(bot_token)
     log.info("Бот запущен.")
-    app.run_polling(allowed_updates=["message", "callback_query"])  # ⬅️ синхронно!
+    # асинхронно, как рекомендует PTB 20+
+    await app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
