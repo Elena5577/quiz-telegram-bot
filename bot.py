@@ -192,25 +192,35 @@ async def difficulty_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------- MAIN ----------------------
-def build_app(bot_token: str):
+ef build_app(bot_token: str) -> Application:
     app = ApplicationBuilder().token(bot_token).build()
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CallbackQueryHandler(category_chosen, pattern="^cat:"))
-    app.add_handler(CallbackQueryHandler(difficulty_chosen, pattern="^diff:"))
-    app.add_handler(CallbackQueryHandler(handle_answer, pattern="^ans:"))
+    register_handlers(app)
     return app
 
 
-async def async_main():
+def main():
     bot_token = os.getenv("BOT_TOKEN")
+    db_url = os.getenv("DATABASE_URL")
+
+    print("=== DEBUG STARTUP ===")
+    print("BOT_TOKEN:", bot_token[:10] if bot_token else "❌ not found")
+    print("DATABASE_URL:", db_url[:30] if db_url else "❌ not found")
+    print("=====================")
+
     if not bot_token:
-        raise RuntimeError("Нет BOT_TOKEN")
+        raise RuntimeError("BOT_TOKEN не найден")
+
     load_questions()
-    await init_db()
+
+    # инициализируем БД (т.к. init_db() async → запускаем внутри event loop)
+    import asyncio
+    asyncio.run(init_db())
+
     app = build_app(bot_token)
     log.info("Бот запущен.")
-    await app.run_polling()
+    # ⬅️ здесь СИНХРОННО, без await и без asyncio.run()
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
-    asyncio.run(async_main())
+    main()
