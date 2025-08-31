@@ -332,10 +332,19 @@ def main():
         raise RuntimeError("BOT_TOKEN не найден")
 
     load_questions()
-    asyncio.run(init_db())  # только для базы
+    asyncio.run(init_db())  # только БД инициализация
+
     app = build_app(bot_token)
     log.info("Бот запущен.")
-    app.run_polling(allowed_updates=["message", "callback_query"])  # синхронно!
+
+    # 👉 фикс для Python 3.11+ — создаём event loop вручную
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":
