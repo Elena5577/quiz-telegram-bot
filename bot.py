@@ -1,351 +1,216 @@
-import sys
-print("Python version:", sys.version)
 import os
-import json
-import random
-import logging
 import asyncio
+import logging
 import asyncpg
-from typing import Dict, List, Tuple, Optional
-
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+import random
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    ContextTypes
 )
 
-# ================== ЛОГИ ==================
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-# ================== НАСТРОЙКИ ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-QUESTIONS_FILE = "questions.json"
+db_pool: asyncpg.Pool = None
+questions = {}
+user_stats = {}
 
-# категории
-CATEGORIES = [
-    ("История 📜", "history"),
-    ("География 🌍", "geography"),
-    ("Астрономия 🌌", "astronomy"),
-    ("Биология 🧬", "biology"),
-    ("Кино 🎬", "cinema"),
-    ("Музыка 🎵", "music"),
-    ("Литература 📚", "literature"),
-    ("Наука 🔬", "science"),
-    ("Искусство 🎨", "art"),
-    ("Техника ⚙️", "technique"),
-]
+# ---------------------- Вопросы ----------------------
+def load_questions():
+    global questions
+    questions = {
+        "math": {
+            "easy": [
+                {"q": "2+2=?", "a": "4", "options": ["3", "4", "5", "6"]},
+                {"q": "5-3=?", "a": "2", "options": ["1", "2", "3", "4"]},
+            ],
+            "hard": [
+                {"q": "12*12=?", "a": "144", "options": ["144", "154", "124", "164"]},
+            ],
+        },
+        "history": {
+            "easy": [
+                {"q": "Кто был первым президентом США?", "a": "Вашингтон", "options": ["Вашингтон", "Линкольн", "Джефферсон", "Адамс"]},
+            ],
+            "hard": [
+                {"q": "В каком году началась Вторая мировая война?", "a": "1939", "options": ["1939", "1941", "1914", "1945"]},
+            ],
+        }
+    }
 
-DIFFICULTY_POINTS = {"easy": 5, "medium": 10, "hard": 15}
 
-# ================== ГЛОБАЛЬНЫЕ ==================
-questions: List[dict] = []
-db_pool: Optional[asyncpg.Pool] = None
-
-
-# ================== БАЗА ==================
+# ---------------------- База ----------------------
 async def init_db():
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
-
+    db_url = os.getenv("DATABASE_URL")
+    db_pool = await asyncpg.create_pool(db_url)
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                score INT DEFAULT 0,
-                combo INT DEFAULT 0,
-                correct INT DEFAULT 0,
-                wrong INT DEFAULT 0
-            );
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS used_questions (
-                user_id BIGINT,
-                question TEXT,
-                PRIMARY KEY(user_id, question)
-            );
-            """
-        )
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            score INT DEFAULT 0,
+            correct INT DEFAULT 0,
+            wrong INT DEFAULT 0,
+            combo INT DEFAULT 0,
+            hints INT DEFAULT 5
+        )""")
 
 
 async def ensure_user(user_id: int):
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO users(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING;",
-            user_id,
-        )
+        user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+        if not user:
+            await conn.execute("INSERT INTO users (user_id) VALUES ($1)", user_id)
 
 
-async def db_get_progress(user_id: int):
+async def update_stats(user_id: int, score=0, correct=0, wrong=0, combo=None, hints=None):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT score, combo, correct, wrong FROM users WHERE user_id=$1", user_id
-        )
-        return row["score"], row["combo"], row["correct"], row["wrong"]
+        if combo is None and hints is None:
+            await conn.execute(
+                "UPDATE users SET score=score+$1, correct=correct+$2, wrong=wrong+$3 WHERE user_id=$4",
+                score, correct, wrong, user_id
+            )
+        else:
+            await conn.execute(
+                "UPDATE users SET score=score+$1, correct=correct+$2, wrong=wrong+$3, combo=$5, hints=$6 WHERE user_id=$4",
+                score, correct, wrong, user_id, combo, hints
+            )
 
 
-async def db_update_progress(user_id: int, score: int, combo: int, correct: int, wrong: int):
+async def get_stats(user_id: int):
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE users SET score=$2, combo=$3, correct=$4, wrong=$5 WHERE user_id=$1",
-            user_id,
-            score,
-            combo,
-            correct,
-            wrong,
-        )
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
 
 
-async def db_mark_used(user_id: int, question: str):
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO used_questions(user_id, question) VALUES($1,$2) ON CONFLICT DO NOTHING",
-            user_id,
-            question,
-        )
-
-
-async def db_is_used(user_id: int, question: str) -> bool:
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT 1 FROM used_questions WHERE user_id=$1 AND question=$2", user_id, question
-        )
-        return row is not None
-
-
-# ================== ВОПРОСЫ ==================
-def load_questions():
-    global questions
-    with open(QUESTIONS_FILE, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    questions = data["questions"]
-
-
-def get_question(user_id: int, category: str, difficulty: str) -> Optional[dict]:
-    candidates = [
-        q
-        for q in questions
-        if q["category"] == category and q["difficulty"] == difficulty
-    ]
-    random.shuffle(candidates)
-    for q in candidates:
-        # фильтруем уже использованные
-        # !!! async нельзя, поэтому отметка делается потом в answer_cb
-        return q
-    return None
-
-
-# ================== КЛАВИАТУРЫ ==================
-def main_menu_kb() -> InlineKeyboardMarkup:
-    buttons = []
-    for i in range(0, len(CATEGORIES), 2):
-        row = [
-            InlineKeyboardButton(CATEGORIES[i][0], callback_data=f"cat|{CATEGORIES[i][1]}"),
-            InlineKeyboardButton(CATEGORIES[i + 1][0], callback_data=f"cat|{CATEGORIES[i+1][1]}"),
-        ]
-        buttons.append(row)
-    return InlineKeyboardMarkup(buttons)
-
-
-def difficulty_kb(cat: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("Лёгкий 🌱", callback_data=f"diff|{cat}|easy"),
-                InlineKeyboardButton("Средний ⚖️", callback_data=f"diff|{cat}|medium"),
-                InlineKeyboardButton("Сложный 🔥", callback_data=f"diff|{cat}|hard"),
-            ],
-            [InlineKeyboardButton("⬅️ В меню", callback_data="menu")],
-        ]
+# ---------------------- UI ----------------------
+def stats_text(user):
+    return (
+        f"🏆 Счёт: {user['score']}\n"
+        f"🔥 Комбо: {user['combo']}\n"
+        f"✔️ Верных: {user['correct']} ❌ Ошибок: {user['wrong']}\n"
+        f"💡 Подсказок: {user['hints']}"
     )
 
 
-def answers_kb(q: dict) -> InlineKeyboardMarkup:
-    opts = list(q["options"])
-    random.shuffle(opts)
-    buttons = [
-        [InlineKeyboardButton(opt, callback_data=f"ans|{q['category']}|{q['difficulty']}|{opt}")]
-        for opt in opts
-    ]
-    buttons.append([InlineKeyboardButton("💡 Подсказка", callback_data="hint")])
-    buttons.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
-    return InlineKeyboardMarkup(buttons)
-
-
-# ================== ХЕНДЛЕРЫ ==================
 async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await ensure_user(user_id)
-    score, combo, tc, tw = await db_get_progress(user_id)
-    text = (
-        f"🏠 *Викторина*\n\n"
-        f"Ваш счёт: *{score}* баллов\n"
-        f"Комбо: *{combo}*\n"
-        f"Правильных: *{tc}*, Неправильных: *{tw}*\n\n"
-        f"Выберите категорию:"
+    user = await get_stats(user_id)
+    keyboard = [
+        [InlineKeyboardButton("📐 Математика", callback_data="cat:math")],
+        [InlineKeyboardButton("📜 История", callback_data="cat:history")],
+    ]
+    await update.message.reply_text(
+        f"👋 Привет, {update.effective_user.first_name}!\n"
+        f"Выбери категорию 👇\n\n{stats_text(user)}",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# ---------------------- Игра ----------------------
+async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE, category, difficulty):
+    q = random.choice(questions[category][difficulty])
+    context.user_data["current_q"] = q
+    context.user_data["category"] = category
+    context.user_data["difficulty"] = difficulty
+
+    options = q["options"].copy()
+    random.shuffle(options)
+    buttons = [[InlineKeyboardButton(opt, callback_data=f"ans:{opt}")] for opt in options]
+
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            text, reply_markup=main_menu_kb(), parse_mode="Markdown"
+            f"❓ {q['q']}", reply_markup=InlineKeyboardMarkup(buttons)
         )
     else:
         await update.message.reply_text(
-            text, reply_markup=main_menu_kb(), parse_mode="Markdown"
+            f"❓ {q['q']}", reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 
+async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await ensure_user(user_id)
+    user = await get_stats(user_id)
+
+    chosen = query.data.split(":")[1]
+    q = context.user_data.get("current_q")
+
+    if not q:
+        await query.answer("Вопроса нет!")
+        return
+
+    if chosen == q["a"]:
+        # правильно
+        new_combo = user["combo"] + 1
+        bonus = 0
+        hints = user["hints"]
+        if new_combo % 3 == 0:
+            bonus = 5
+            hints += 1
+        await update_stats(user_id, score=10 + bonus, correct=1, combo=new_combo, hints=hints, wrong=0)
+        user = await get_stats(user_id)
+        text = f"✅ Правильно! +10\n"
+        if bonus:
+            text += f"🔥 Комбо {new_combo}! +5 и +1 💡\n"
+    else:
+        # неправильно
+        new_combo = 0
+        await update_stats(user_id, score=-5, wrong=1, combo=new_combo, hints=user["hints"])
+        user = await get_stats(user_id)
+        text = f"❌ Неверно! -5\n"
+
+    text += "\n" + stats_text(user)
+
+    await query.edit_message_text(text)
+
+    # следующий вопрос
+    await ask_question(update, context, context.user_data["category"], context.user_data["difficulty"])
+
+
+# ---------------------- Handlers ----------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_menu(update, context)
 
 
-async def score_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await ensure_user(user_id)
-    score, combo, tc, tw = await db_get_progress(user_id)
-    await update.message.reply_text(
-        f"📊 Ваш счёт: {score}\nКомбо: {combo}\nПравильных: {tc}, Неправильных: {tw}"
-    )
-
-
-async def menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await send_menu(update, context)
-
-
-async def category_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    cat = q.data.split("|")[1]
-    await q.edit_message_text(
-        f"Выберите сложность для категории: {cat}", reply_markup=difficulty_kb(cat)
-    )
-
-
-async def difficulty_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    _, cat, diff = q.data.split("|")
-    qst = get_question(update.effective_user.id, cat, diff)
-    if not qst:
-        await q.edit_message_text("❌ Вопросы закончились.", reply_markup=main_menu_kb())
-        return
-    await q.edit_message_text(
-        f"❓ {qst['question']}", reply_markup=answers_kb(qst)
-    )
-    context.user_data["current_q"] = qst
-
-
-async def answer_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    user_id = update.effective_user.id
-    data = q.data.split("|")
-    chosen = data[3]
-    qst = context.user_data.get("current_q")
-    if not qst:
-        await q.edit_message_text("Ошибка. Попробуйте снова.", reply_markup=main_menu_kb())
-        return
-
-    correct = qst["answer"]
-    score, combo, tc, tw = await db_get_progress(user_id)
-
-    if chosen == correct:
-        base = DIFFICULTY_POINTS[qst["difficulty"]]
-        combo += 1
-        extra = 5 if combo % 3 == 0 else 0
-        score += base + extra
-        tc += 1
-        await q.edit_message_text(
-            f"✅ Правильно! (+{base}{' +5 комбо' if extra else ''})",
-            reply_markup=main_menu_kb(),
-        )
-    else:
-        combo = 0
-        tw += 1
-        await q.edit_message_text(
-            f"❌ Неверно! Правильный ответ: {correct}", reply_markup=main_menu_kb()
-        )
-
-    await db_update_progress(user_id, score, combo, tc, tw)
-    await db_mark_used(user_id, qst["question"])
-
-
-async def hint_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    qst = context.user_data.get("current_q")
-    if not qst:
-        return
-    options = list(qst["options"])
-    options.remove(qst["answer"])
-    to_remove = random.sample(options, 2)
-    new_opts = [o for o in qst["options"] if o not in to_remove]
-    buttons = [
-        [InlineKeyboardButton(opt, callback_data=f"ans|{qst['category']}|{qst['difficulty']}|{opt}")]
-        for opt in new_opts
+async def category_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    category = query.data.split(":")[1]
+    keyboard = [
+        [InlineKeyboardButton("😀 Лёгкий", callback_data=f"diff:{category}:easy")],
+        [InlineKeyboardButton("🤯 Сложный", callback_data=f"diff:{category}:hard")],
     ]
-    buttons.append([InlineKeyboardButton("⬅️ В меню", callback_data="menu")])
-    await q.edit_message_text(f"❓ {qst['question']}", reply_markup=InlineKeyboardMarkup(buttons))
+    await query.edit_message_text("Выбери сложность:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
-# ================== РЕГИСТРАЦИЯ ==================
-def register_handlers(app: Application):
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("score", score_cmd))
-    app.add_handler(CallbackQueryHandler(menu_cb, pattern="^menu$"))
-    app.add_handler(CallbackQueryHandler(category_cb, pattern=r"^cat\|"))
-    app.add_handler(CallbackQueryHandler(difficulty_cb, pattern=r"^diff\|"))
-    app.add_handler(CallbackQueryHandler(answer_cb, pattern=r"^ans\|"))
-    app.add_handler(CallbackQueryHandler(hint_cb, pattern="^hint$"))
+async def difficulty_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    _, category, diff = query.data.split(":")
+    await ask_question(update, context, category, diff)
 
-def build_app(bot_token: str) -> Application:
+
+# ---------------------- MAIN ----------------------
+def build_app(bot_token: str):
     app = ApplicationBuilder().token(bot_token).build()
-    register_handlers(app)
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CallbackQueryHandler(category_chosen, pattern="^cat:"))
+    app.add_handler(CallbackQueryHandler(difficulty_chosen, pattern="^diff:"))
+    app.add_handler(CallbackQueryHandler(handle_answer, pattern="^ans:"))
     return app
 
-# ================== MAIN ==================
-# ================== MAIN ==================
-def main():
+
+async def async_main():
     bot_token = os.getenv("BOT_TOKEN")
-    db_url = os.getenv("DATABASE_URL")
-
-    print("=== DEBUG STARTUP ===")
-    print("BOT_TOKEN:", bot_token[:10] if bot_token else "❌ not found")
-    print("DATABASE_URL:", db_url[:30] if db_url else "❌ not found")
-    print("=====================")
-
     if not bot_token:
-        raise RuntimeError("BOT_TOKEN не найден")
-
+        raise RuntimeError("Нет BOT_TOKEN")
     load_questions()
-    asyncio.run(init_db())  # только БД инициализация
-
+    await init_db()
     app = build_app(bot_token)
     log.info("Бот запущен.")
-
-    # 👉 фикс для Python 3.11+ — создаём event loop вручную
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    app.run_polling(allowed_updates=["message", "callback_query"])
+    await app.run_polling()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())
