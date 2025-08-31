@@ -192,7 +192,7 @@ async def difficulty_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ---------------------- MAIN ----------------------
-ef build_app(bot_token: str) -> Application:
+def build_app(bot_token: str) -> Application:
     app = ApplicationBuilder().token(bot_token).build()
     register_handlers(app)
     return app
