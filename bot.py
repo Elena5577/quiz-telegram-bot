@@ -216,6 +216,12 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(start, pattern="^menu$"))
 
 # ===== MAIN =====
+def build_app(bot_token: str) -> Application:
+    app = ApplicationBuilder().token(bot_token).build()
+    register_handlers(app)
+    return app
+
+
 def main():
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
