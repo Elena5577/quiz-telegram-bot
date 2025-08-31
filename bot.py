@@ -9,18 +9,24 @@ from telegram.ext import (
     ContextTypes
 )
 
+# ==========================
 # Логирование
+# ==========================
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DB_POOL = None
 
-# ===== БД =====
+# ==========================
+# Инициализация базы данных
+# ==========================
 async def init_db():
+    """Создаёт пул соединений и необходимые таблицы."""
     global DB_POOL
     DB_POOL = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
 
     async with DB_POOL.acquire() as conn:
+        # Таблица пользователей
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
@@ -31,6 +37,7 @@ async def init_db():
             hints INT DEFAULT 5
         )
         """)
+        # Таблица вопросов
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS questions (
             id SERIAL PRIMARY KEY,
@@ -43,6 +50,7 @@ async def init_db():
         """)
 
 async def ensure_user(user_id: int):
+    """Проверяет, есть ли пользователь в БД, и создаёт при необходимости."""
     async with DB_POOL.acquire() as conn:
         user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
         if not user:
@@ -51,7 +59,9 @@ async def ensure_user(user_id: int):
                 user_id
             )
 
-# ===== HUD =====
+# ==========================
+# HUD (информация для пользователя)
+# ==========================
 async def get_hud(user_id: int):
     async with DB_POOL.acquire() as conn:
         user = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
@@ -60,7 +70,9 @@ async def get_hud(user_id: int):
             f"✅ Верных: {user['correct']} ❌ Ошибок: {user['wrong']}\n"
             f"🔑 Подсказки: {user['hints']}")
 
-# ===== Игровой процесс =====
+# ==========================
+# Игровой процесс
+# ==========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await ensure_user(user_id)
@@ -126,7 +138,9 @@ async def choose_difficulty(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, cat, diff = query.data.split(":")
     await send_question(update, context, cat, diff)
 
-# ===== Обработка ответа =====
+# ==========================
+# Обработка ответа
+# ==========================
 async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -160,7 +174,9 @@ async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"{hud}\n\n{text}\n\nВыбери категорию:",
                                   reply_markup=await main_menu())
 
-# ===== Подсказка =====
+# ==========================
+# Подсказка
+# ==========================
 async def use_hint(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -190,7 +206,9 @@ async def use_hint(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"{hud}\n\n❓ {q['question']}",
                                   reply_markup=InlineKeyboardMarkup(buttons))
 
-# ===== Главное меню =====
+# ==========================
+# Главное меню
+# ==========================
 async def main_menu():
     keyboard = [
         [InlineKeyboardButton("🌍 География", callback_data="cat:geo"),
@@ -206,7 +224,9 @@ async def main_menu():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ===== Регистрация =====
+# ==========================
+# Регистрация хендлеров
+# ==========================
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(choose_category, pattern="^cat:"))
@@ -215,14 +235,15 @@ def register_handlers(app: Application):
     app.add_handler(CallbackQueryHandler(use_hint, pattern="^hint:"))
     app.add_handler(CallbackQueryHandler(start, pattern="^menu$"))
 
-# ===== MAIN =====
 def build_app(bot_token: str) -> Application:
     app = ApplicationBuilder().token(bot_token).build()
     register_handlers(app)
     return app
 
-
-def main():
+# ==========================
+# Асинхронный старт бота (для Render)
+# ==========================
+async def async_main():
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
 
@@ -234,13 +255,17 @@ def main():
     if not bot_token:
         raise RuntimeError("BOT_TOKEN не найден")
 
-    # Создаём event loop (важно для Python 3.12)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # Инициализация БД
+    await init_db()
 
-    # инициализация БД (однократная)
-    loop.run_until_complete(init_db())
-
+    # Создаём приложение
     app = build_app(bot_token)
-    app.run_polling(allowed_updates=["message", "callback_query"])
 
+    # Стартуем polling (бот работает как background worker, порт не нужен)
+    await app.run_polling(allowed_updates=["message", "callback_query"])
+
+def main():
+    asyncio.run(async_main())
+
+if __name__ == "__main__":
+    main()
