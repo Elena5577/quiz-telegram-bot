@@ -3,6 +3,7 @@ import asyncio
 import logging
 import asyncpg
 import random
+from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -90,7 +91,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📚 Литература", callback_data="cat:literature"),
          InlineKeyboardButton("❓ Разное", callback_data="cat:other")],
     ]
-    await update.message.reply_text(f"{hud}\n\nВыбери категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+    # обработка как для message (пришёл /start)
+    if update.message:
+        await update.message.reply_text(f"{hud}\n\nВыбери категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        # на всякий случай, если update пришёл не как message
+        try:
+            await context.bot.send_message(chat_id=update.effective_user.id, text=f"{hud}\n\nВыбери категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            pass
 
 async def choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -241,54 +250,111 @@ def build_app(bot_token: str) -> Application:
     return app
 
 # ==========================
-# Асинхронный старт бота (для Render)
+# AIOHTTP webhook handler
+# ==========================
+def make_aiohttp_app(telegram_app: Application, bot_token: str):
+    async def handle(request: web.Request):
+        try:
+            data = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json")
+
+        try:
+            update = Update.de_json(data, telegram_app.bot)
+            # помещаем апдейт в очередь приложения
+            await telegram_app.update_queue.put(update)
+        except Exception as e:
+            logger.exception("Failed to enqueue update: %s", e)
+            return web.Response(status=500, text="error")
+        return web.Response(text="OK")
+
+    aio_app = web.Application()
+    # webhook path
+    aio_app.router.add_post(f"/webhook/{bot_token}", handle)
+    # health check (Render может сканировать)
+    async def health(request):
+        return web.Response(text="OK")
+    aio_app.router.add_get("/", health)
+    return aio_app
+
+# ==========================
+# Асинхронный старт бота (webhook для Render)
 # ==========================
 async def async_main():
-    bot_token = os.getenv("BOT_TOKEN")
-    db_url = os.getenv("DATABASE_URL")
-    port = int(os.getenv("PORT", "8080"))  # Render задаёт PORT
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    RENDER_URL = os.getenv("RENDER_URL")  # https://your-app.onrender.com
+    PORT = int(os.getenv("PORT", "8080"))  # Render даёт PORT
 
     print("=== DEBUG STARTUP ===")
-    print("BOT_TOKEN:", (bot_token[:10] + "…") if bot_token else "❌ not found")
-    print("DATABASE_URL:", (db_url[:30] + "…") if db_url else "❌ not found")
-    print("PORT:", port)
+    print("BOT_TOKEN:", (BOT_TOKEN[:10] + "…") if BOT_TOKEN else "❌ not found")
+    print("DATABASE_URL:", (DATABASE_URL[:30] + "…") if DATABASE_URL else "❌ not found")
+    print("RENDER_URL:", RENDER_URL if RENDER_URL else "❌ not found")
+    print("PORT:", PORT)
     print("=====================")
 
-    if not bot_token:
+    if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не найден")
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL не задан — если нужен, задайте в окружении")
 
-    # Инициализация БД
+    # init DB
     await init_db()
 
-    # Создаём приложение
-    app = build_app(bot_token)
+    # build telegram app and handlers
+    telegram_app = build_app(BOT_TOKEN)
 
-    # URL, по которому Render принимает вебхуки
-    # заменишь YOUR_RENDER_APP на свой домен (например quiz-bot.onrender.com)
-    webhook_url = f"https://quiz-telegram-bot-47uc.onrender.com/webhook/{bot_token}"
+    # initialize & start application (so update_queue exists)
+    await telegram_app.initialize()
+    await telegram_app.start()
+    logger.info("Telegram application initialized and started.")
 
-    # Запускаем webhook
-    await app.initialize()
-    await app.bot.set_webhook(webhook_url)  # регистрируем у Telegram
-    await app.start()
-    await app.updater.start_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=f"webhook/{bot_token}",
-        webhook_url=webhook_url,
-    )
+    # prepare aiohttp server
+    aio_app = make_aiohttp_app(telegram_app, BOT_TOKEN)
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info("aiohttp server started on port %s", PORT)
 
-    print(f"Bot started with webhook on {webhook_url}")
+    # set webhook at Telegram
+    if RENDER_URL:
+        webhook_url = f"{RENDER_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+    else:
+        # fallback: try to read external url env that some providers set
+        external = os.getenv("EXTERNAL_URL") or os.getenv("RENDER_EXTERNAL_URL")
+        if external:
+            webhook_url = f"{external.rstrip('/')}/webhook/{BOT_TOKEN}"
+        else:
+            raise RuntimeError("RENDER_URL (или EXTERNAL_URL) не задан — нужен публичный URL для webhook")
 
+    # delete previous webhook (safe) and set new one
     try:
-        # держим процесс живым
+        await telegram_app.bot.delete_webhook()
+    except Exception:
+        pass
+
+    await telegram_app.bot.set_webhook(webhook_url)
+    logger.info("Webhook set to %s", webhook_url)
+
+    # держим процесс живым; корректно реагируем на KeyboardInterrupt/terminate
+    try:
         while True:
             await asyncio.sleep(3600)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("Received exit signal, shutting down...")
     finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-
+        # очистка
+        try:
+            await telegram_app.bot.delete_webhook()
+        except Exception:
+            pass
+        await runner.cleanup()
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+        # закрываем DB pool
+        if DB_POOL:
+            await DB_POOL.close()
 
 if __name__ == "__main__":
     asyncio.run(async_main())
