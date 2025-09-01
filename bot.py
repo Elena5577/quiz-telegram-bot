@@ -246,10 +246,12 @@ def build_app(bot_token: str) -> Application:
 async def async_main():
     bot_token = os.getenv("BOT_TOKEN")
     db_url = os.getenv("DATABASE_URL")
+    port = int(os.getenv("PORT", "8080"))  # Render задаёт PORT
 
     print("=== DEBUG STARTUP ===")
     print("BOT_TOKEN:", (bot_token[:10] + "…") if bot_token else "❌ not found")
     print("DATABASE_URL:", (db_url[:30] + "…") if db_url else "❌ not found")
+    print("PORT:", port)
     print("=====================")
 
     if not bot_token:
@@ -261,19 +263,32 @@ async def async_main():
     # Создаём приложение
     app = build_app(bot_token)
 
-    # === Исправленный старт polling ===
-    await app.initialize()   # инициализация приложения
-    await app.start()        # старт приложения
-    print("Bot started… polling now")
+    # URL, по которому Render принимает вебхуки
+    # заменишь YOUR_RENDER_APP на свой домен (например quiz-bot.onrender.com)
+    webhook_url = f"https://quiz-telegram-bot-47uc.onrender.com/webhook/{bot_token}"
+
+    # Запускаем webhook
+    await app.initialize()
+    await app.bot.set_webhook(webhook_url)  # регистрируем у Telegram
+    await app.start()
+    await app.updater.start_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=f"webhook/{bot_token}",
+        webhook_url=webhook_url,
+    )
+
+    print(f"Bot started with webhook on {webhook_url}")
 
     try:
-        # держим процесс живым, polling работает в фоне
+        # держим процесс живым
         while True:
             await asyncio.sleep(3600)
     finally:
+        await app.updater.stop()
         await app.stop()
         await app.shutdown()
 
+
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()           # используем уже существующий loop
-    loop.run_until_complete(async_main())     # запускаем async_main
+    asyncio.run(async_main())
